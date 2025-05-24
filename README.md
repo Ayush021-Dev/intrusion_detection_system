@@ -21,7 +21,7 @@ A real-time intrusion detection system using YOLOv8 and Streamlit. This system m
 
 1. Clone the repository:
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/Ayush021-Dev/intrusion_detection_system.git
 cd intrusion_detection_system
 ```
 
