@@ -1,0 +1,9 @@
+numpy==1.24.3
+opencv-python==4.8.0.76
+streamlit==1.24.0
+torch==2.0.1
+torchvision==0.15.2
+ultralytics==8.0.20
+mysql-connector-python==8.0.33
+pandas==2.0.3
+pillow>=6.2.0,<10.0.0
