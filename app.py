@@ -180,63 +180,87 @@ def zone_adjustment_page():
     # Instructions
     st.write("""
     ### Instructions:
-    - Use the sliders to adjust the 4 corner points of the detection zone
-    - The changes will be visible in the preview
+    - Use the sliders below to adjust the zone points
+    - The green quadrilateral shows the detection zone
+    - Points are numbered 1-4 in the preview
     - Click "Save Zone Settings" to apply your changes
+    - Click "Reset to Default" to restore default zone
     """)
     
     # Get current zone points
     zone_points = st.session_state['zone_points']
     
-    # Get frame dimensions from camera
-    cap = cv2.VideoCapture(CAMERA_INDEX)
-    ret, frame = cap.read()
-    cap.release()
+    # Create a placeholder for the video feed
+    frame_placeholder = st.empty()
     
+    # Initialize camera
+    cap = cv2.VideoCapture(CAMERA_INDEX)
+    if not cap.isOpened():
+        st.error("Failed to capture video from camera")
+        return
+    
+    # Get frame dimensions
+    ret, frame = cap.read()
     if not ret:
         st.error("Failed to capture video from camera")
         return
     
     height, width = frame.shape[:2]
     
-        # Create placeholders for zone points
+    # Create a copy of the frame for drawing
+    preview_frame = frame.copy()
+    
+    # Draw current zone points
+    zone_detector = ZoneDetector(zone_points)
+    preview_frame = zone_detector.draw_zone(preview_frame)
+    
+    # Draw point numbers
+    for i, (x, y) in enumerate(zone_points):
+        cv2.circle(preview_frame, (x, y), 5, (0, 255, 0), -1)
+        cv2.putText(preview_frame, str(i+1), (x+10, y+10), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+    
+    # Display the frame
+    frame_placeholder.image(cv2.cvtColor(preview_frame, cv2.COLOR_BGR2RGB), use_column_width=True)
+    
+    # Create columns for coordinate inputs
     col1, col2 = st.columns(2)
     
     with col1:
         st.write("Point 1")
-        x1 = st.slider("Point 1 X", 0, width, zone_points[0][0], key="x1")
-        y1 = st.slider("Point 1 Y", 0, height, zone_points[0][1], key="y1")
+        x1 = st.slider("X1", 0, width, zone_points[0][0], key="x1")
+        y1 = st.slider("Y1", 0, height, zone_points[0][1], key="y1")
         
         st.write("Point 2")
-        x2 = st.slider("Point 2 X", 0, width, zone_points[1][0], key="x2")
-        y2 = st.slider("Point 2 Y", 0, height, zone_points[1][1], key="y2")
+        x2 = st.slider("X2", 0, width, zone_points[1][0], key="x2")
+        y2 = st.slider("Y2", 0, height, zone_points[1][1], key="y2")
     
     with col2:
         st.write("Point 3")
-        x3 = st.slider("Point 3 X", 0, width, zone_points[2][0], key="x3")
-        y3 = st.slider("Point 3 Y", 0, height, zone_points[2][1], key="y3")
+        x3 = st.slider("X3", 0, width, zone_points[2][0], key="x3")
+        y3 = st.slider("Y3", 0, height, zone_points[2][1], key="y3")
         
         st.write("Point 4")
-        x4 = st.slider("Point 4 X", 0, width, zone_points[3][0], key="x4")
-        y4 = st.slider("Point 4 Y", 0, height, zone_points[3][1], key="y4")
+        x4 = st.slider("X4", 0, width, zone_points[3][0], key="x4")
+        y4 = st.slider("Y4", 0, height, zone_points[3][1], key="y4")
     
     # Update zone points
     new_zone_points = [(x1, y1), (x2, y2), (x3, y3), (x4, y4)]
     
-    # Display a preview
-    cap = cv2.VideoCapture(CAMERA_INDEX)
-    ret, frame = cap.read()
-    cap.release()
+    # Create a zone detector with the new points
+    temp_zone_detector = ZoneDetector(new_zone_points)
     
-    if ret:
-        # Create a zone detector with the new points
-        temp_zone_detector = ZoneDetector(new_zone_points)
-        
-        # Draw the zone on the frame
-        preview_frame = temp_zone_detector.draw_zone(frame.copy())
-        
-        # Display the preview
-        st.image(cv2.cvtColor(preview_frame, cv2.COLOR_BGR2RGB), caption="Zone Preview", use_column_width=True)
+    # Draw the zone on the frame
+    preview_frame = temp_zone_detector.draw_zone(frame.copy())
+    
+    # Draw point numbers
+    for i, (x, y) in enumerate(new_zone_points):
+        cv2.circle(preview_frame, (x, y), 5, (0, 255, 0), -1)
+        cv2.putText(preview_frame, str(i+1), (x+10, y+10), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+    
+    # Display the preview
+    frame_placeholder.image(cv2.cvtColor(preview_frame, cv2.COLOR_BGR2RGB), use_column_width=True)
     
     # Save button
     if st.button("Save Zone Settings"):
@@ -248,6 +272,9 @@ def zone_adjustment_page():
         st.session_state['zone_points'] = DEFAULT_ZONE_POINTS
         st.success("Zone reset to default!")
         st.experimental_rerun()
+    
+    # Release camera
+    cap.release()
 
 # Page: View Logs
 def view_logs_page():
