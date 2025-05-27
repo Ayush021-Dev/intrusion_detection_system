@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="card">
+    <div class="card-header">
+        <h5 class="card-title mb-0">Intrusion Logs</h5>
+    </div>
+    <div class="card-body">
+        <div class="row mb-3">
+            <div class="col-md-4">
+                <select class="form-select" id="category-filter" onchange="filterLogs()">
+                    <option value="all">All Events</option>
+                    <option value="Entry">Entry</option>
+                    <option value="Exit">Exit</option>
+                    <option value="Significant Motion">Significant Motion</option>
+                </select>
+            </div>
+            <div class="col-md-4">
+                <input type="date" class="form-control" id="date-filter" onchange="filterLogs()">
+            </div>
+            <div class="col-md-4">
+                <button class="btn btn-primary" onclick="exportLogs()">Export to CSV</button>
+            </div>
+        </div>
+
+        <div class="table-responsive">
+            <table class="table table-striped">
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Timestamp</th>
+                        <th>Camera ID</th>
+                        <th>Event Type</th>
+                        <th>Screenshot</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for log in logs %}
+                    <tr>
+                        <td>{{ log.id }}</td>
+                        <td>{{ log.timestamp|localtime }}</td>
+                        <td>{{ log.camera_id }}</td>
+                        <td>{{ log.event_type }}</td>
+                        <td>
+                            <img src="{{ url_for('serve_screenshot', filename=log.image_path|basename) }}" 
+                                 class="log-image" style="max-width: 200px;">
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function filterLogs() {
+    const category = document.getElementById('category-filter').value;
+    const date = document.getElementById('date-filter').value;
+    
+    let url = '/logs?';
+    if (category !== 'all') {
+        url += `category=${category}&`;
+    }
+    if (date) {
+        url += `date=${date}`;
+    }
+    
+    window.location.href = url;
+}
+
+function exportLogs() {
+    const category = document.getElementById('category-filter').value;
+    const date = document.getElementById('date-filter').value;
+    
+    let url = '/export_logs?';
+    if (category !== 'all') {
+        url += `category=${category}&`;
+    }
+    if (date) {
+        url += `date=${date}`;
+    }
+    
+    window.location.href = url;
+}
+</script>
+{% endblock %} 

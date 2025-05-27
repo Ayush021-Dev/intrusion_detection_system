@@ -1,0 +1,131 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="row">
+    <div class="col-md-8">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">Live Camera Feed</h5>
+            </div>
+            <div class="card-body" style="position: relative; width: fit-content;">
+                <div class="video-container" style="position: relative; display: inline-block;">
+                    <img id="videoFeed" src="{{ url_for('video_feed') }}" class="img-fluid" alt="Video Feed" style="display: block;">
+                    <canvas id="zoneCanvas" style="position: absolute; left: 0; top: 0; pointer-events: auto;"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">Zone Adjustment</h5>
+            </div>
+            <div class="card-body">
+                <button class="btn btn-primary" onclick="updateZone()">Update Zone</button>
+                <button class="btn btn-secondary" onclick="resetZone()">Reset to Default</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let zonePoints = [
+    [100, 100],
+    [400, 100],
+    [400, 300],
+    [100, 300]
+];
+let selectedPoint = -1;
+const canvas = document.getElementById('zoneCanvas');
+const ctx = canvas.getContext('2d');
+const video = document.getElementById('videoFeed');
+
+function resizeCanvas() {
+    canvas.width = video.clientWidth;
+    canvas.height = video.clientHeight;
+    drawZone();
+}
+
+video.onload = resizeCanvas;
+window.addEventListener('resize', resizeCanvas);
+
+function drawZone() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.beginPath();
+    ctx.moveTo(zonePoints[0][0], zonePoints[0][1]);
+    for (let i = 1; i < zonePoints.length; i++) {
+        ctx.lineTo(zonePoints[i][0], zonePoints[i][1]);
+    }
+    ctx.closePath();
+    ctx.strokeStyle = 'green';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    zonePoints.forEach((point, index) => {
+        ctx.beginPath();
+        ctx.arc(point[0], point[1], 6, 0, Math.PI * 2);
+        ctx.fillStyle = 'red';
+        ctx.fill();
+    });
+}
+
+function isPointNear(x, y, point) {
+    return Math.abs(x - point[0]) < 10 && Math.abs(y - point[1]) < 10;
+}
+
+canvas.addEventListener('mousedown', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    selectedPoint = zonePoints.findIndex(point => isPointNear(x, y, point));
+});
+
+canvas.addEventListener('mousemove', (e) => {
+    if (selectedPoint !== -1) {
+        const rect = canvas.getBoundingClientRect();
+        zonePoints[selectedPoint][0] = e.clientX - rect.left;
+        zonePoints[selectedPoint][1] = e.clientY - rect.top;
+        drawZone();
+    }
+});
+
+canvas.addEventListener('mouseup', () => {
+    selectedPoint = -1;
+});
+
+function updateZone() {
+    fetch('/update_zone', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ points: zonePoints })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.status === 'success') {
+            alert('Zone updated successfully!');
+        }
+    })
+    .catch(error => {
+        console.error('Error:', error);
+        alert('Failed to update zone');
+    });
+}
+
+function resetZone() {
+    zonePoints = [
+        [100, 100],
+        [400, 100],
+        [400, 300],
+        [100, 300]
+    ];
+    drawZone();
+    updateZone();
+}
+
+// Initial resize and draw
+resizeCanvas();
+</script>
+{% endblock %} 

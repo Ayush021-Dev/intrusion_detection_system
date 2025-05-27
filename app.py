@@ -1,4 +1,4 @@
-import streamlit as st
+from flask import Flask, render_template, Response, jsonify, request, send_file
 import cv2
 import numpy as np
 import time
@@ -6,9 +6,13 @@ from datetime import datetime, date
 import os
 import pandas as pd
 import threading
+from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import DateTime
+import json
+import io
+from pytz import timezone, utc
 
 # Import from project modules
-from database.db_handler import DatabaseHandler
 from detection.detector import ObjectDetector
 from detection.zone_detector import ZoneDetector
 from utils.image_utils import save_screenshot, add_timestamp, resize_image
@@ -17,136 +21,101 @@ from config import (
     DEFAULT_ZONE_POINTS, CONFIDENCE_THRESHOLD, SCREENSHOT_DIR
 )
 
-# Set page configuration
-st.set_page_config(
-    page_title="Intrusion Detection System",
-    page_icon="🔍",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+app = Flask(__name__)
+
+# Configure SQLAlchemy
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///intrusion.db'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+db = SQLAlchemy(app)
+
+# Define database models
+class IntrusionLog(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    timestamp = db.Column(DateTime, nullable=False, default=datetime.utcnow)
+    camera_id = db.Column(db.String(50), nullable=False)
+    image_path = db.Column(db.String(255), nullable=False)
+    event_type = db.Column(db.String(50), default='Detection')
 
 # Global variables
 PREVIOUS_PERSON_COUNT = 0
 LAST_DETECTION_TIME = 0
 PREVIOUS_FRAME = None
-MOTION_THRESHOLD = 30  # Threshold for motion detection
-MIN_MOTION_AREA = 2000  # Increased minimum area to ignore small movements
-MAX_MOTION_AREA = 100000  # Maximum area to consider
-MIN_MOTION_WIDTH = 50  # Minimum width of motion to consider
-MIN_MOTION_HEIGHT = 50  # Minimum height of motion to consider
+MOTION_THRESHOLD = 30
+MIN_MOTION_AREA = 2000
+MAX_MOTION_AREA = 100000
+MIN_MOTION_WIDTH = 50
+MIN_MOTION_HEIGHT = 50
 
-# Initialize session state
-if 'zone_points' not in st.session_state:
-    st.session_state['zone_points'] = DEFAULT_ZONE_POINTS
+# Initialize zone points
+zone_points = DEFAULT_ZONE_POINTS
 
-# Cache the model to prevent reloading
-@st.cache_resource
-def load_model():
-    return ObjectDetector(confidence_threshold=CONFIDENCE_THRESHOLD)
-
-# Initialize database handler
-@st.cache_resource
-def get_db_handler():
-    return DatabaseHandler(
-        DB_CONFIG['host'],
-        DB_CONFIG['user'],
-        DB_CONFIG['password'],
-        DB_CONFIG['database']
-    )
+# Initialize detector
+detector = ObjectDetector(confidence_threshold=CONFIDENCE_THRESHOLD)
+zone_detector = ZoneDetector(zone_points)
 
 def detect_motion(frame, zone_detector):
     global PREVIOUS_FRAME
     
-    # Convert frame to grayscale
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     gray = cv2.GaussianBlur(gray, (21, 21), 0)
     
-    # Initialize previous frame if None
     if PREVIOUS_FRAME is None:
         PREVIOUS_FRAME = gray
         return False, frame
     
-    # Calculate absolute difference between current and previous frame
     frame_delta = cv2.absdiff(PREVIOUS_FRAME, gray)
     thresh = cv2.threshold(frame_delta, MOTION_THRESHOLD, 255, cv2.THRESH_BINARY)[1]
-    
-    # Dilate the thresholded image to fill in holes
     thresh = cv2.dilate(thresh, None, iterations=2)
     
-    # Find contours of moving objects
     contours, _ = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
     motion_detected = False
     motion_frame = frame.copy()
     
-    # Check each contour
     for contour in contours:
-        # Get bounding box of the contour
         (x, y, w, h) = cv2.boundingRect(contour)
         area = cv2.contourArea(contour)
         
-        # Skip if the motion is too small (birds, small animals) or too large (camera shake)
         if (area < MIN_MOTION_AREA or area > MAX_MOTION_AREA or 
             w < MIN_MOTION_WIDTH or h < MIN_MOTION_HEIGHT):
             continue
             
-        # Check if the motion is in the zone
         if zone_detector.is_in_zone((x, y, x + w, y + h)):
             motion_detected = True
-            # Draw rectangle around motion
             cv2.rectangle(motion_frame, (x, y), (x + w, y + h), (0, 255, 255), 2)
             cv2.putText(motion_frame, "Motion", (x, y - 10),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
     
-    # Update previous frame
     PREVIOUS_FRAME = gray
-    
     return motion_detected, motion_frame
 
-# Process frame function
-def process_frame(frame, detector, zone_detector):
+def process_frame(frame):
     global LAST_DETECTION_TIME, PREVIOUS_PERSON_COUNT
     
-    # Make a copy of the frame
     processed_frame = frame.copy()
-    
-    # Detect objects
     detections = detector.detect(processed_frame)
-    
-    # Draw zone
     processed_frame = zone_detector.draw_zone(processed_frame)
     
-    # Count people in the zone
     people_in_zone = 0
     for detection in detections:
         if zone_detector.is_in_zone(detection['bbox']):
             people_in_zone += 1
     
-    # Draw detections
     processed_frame = detector.draw_detections(processed_frame, detections, zone_detector)
-    
-    # Detect motion
     motion_detected, motion_frame = detect_motion(frame, zone_detector)
     
-    # Add count text to frame
     cv2.putText(processed_frame, f"People in zone: {people_in_zone}", 
                (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
     
-    # Add motion detection text
     if motion_detected:
         cv2.putText(processed_frame, "Significant Motion Detected!", 
                    (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
     
-    # Check if there's any activity (people or significant motion)
     activity_detected = people_in_zone > 0 or motion_detected
-    
-    # Check if the number of people in the zone has changed or significant motion is detected
     current_time = time.time()
     person_count_changed = people_in_zone != PREVIOUS_PERSON_COUNT
     
-    # Take screenshot if count changed or significant motion detected and cooldown period passed
     if (person_count_changed or motion_detected) and current_time - LAST_DETECTION_TIME > DETECTION_COOLDOWN:
-        # Determine event type
         if people_in_zone > PREVIOUS_PERSON_COUNT:
             event_type = "Entry"
         elif people_in_zone < PREVIOUS_PERSON_COUNT:
@@ -156,370 +125,129 @@ def process_frame(frame, detector, zone_detector):
         else:
             event_type = "Change"
         
-        # Add event type to the frame
         cv2.putText(processed_frame, f"Event: {event_type}", 
                    (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
         
-        # Add timestamp
         timestamped_frame = add_timestamp(processed_frame)
-        
-        # Save screenshot
         image_path = save_screenshot(timestamped_frame, SCREENSHOT_DIR, event_type)
         
-        # Log the intrusion with the event type
-        db_handler = get_db_handler()
-        db_handler.log_intrusion(CAMERA_ID, image_path, event_type)
+        log = IntrusionLog(
+            camera_id=CAMERA_ID,
+            image_path=image_path,
+            event_type=event_type
+        )
+        from flask import current_app
+        with app.app_context():
+            db.session.add(log)
+            db.session.commit()
         
-        # Update the last detection time
         LAST_DETECTION_TIME = current_time
     
-    # Update the previous count for the next frame
     PREVIOUS_PERSON_COUNT = people_in_zone
-    
     return processed_frame, activity_detected
 
-# Page: Home / Camera Feed
-def camera_feed_page():
-    st.subheader("Live Camera Feed")
-    
-    # Instructions
-    st.write("""
-    ### Instructions:
-    - The green quadrilateral shows the detection zone
-    - When a person enters or exits the zone, a screenshot will be saved
-    - Adjust the zone in the "Adjust Zone" page
-    - View detection logs in the "View Logs" page
-    """)
-    
-    # Initialize detector and zone detector
-    detector = load_model()
-    zone_detector = ZoneDetector(st.session_state['zone_points'])
-    
-    # Camera selection (currently only one camera)
-    st.write("Camera: Default Webcam (ID: {})".format(CAMERA_ID))
-    
-    # Create placeholders for the video feed
-    frame_placeholder = st.empty()
-    status_placeholder = st.empty()
-    
-    # Create a stop button
-    col1, col2 = st.columns([1, 4])
-    with col1:
-        stop_button = st.button("Stop Camera")
-    
-    # Open camera
+def generate_frames():
     cap = cv2.VideoCapture(CAMERA_INDEX)
-    
-    if not cap.isOpened():
-        st.error("Error: Could not open webcam")
-        return
-    
-    # Main loop for camera feed
-    while cap.isOpened() and not stop_button:
-        ret, frame = cap.read()
-        if not ret:
-            st.error("Failed to capture video")
+    while True:
+        success, frame = cap.read()
+        if not success:
             break
-        
-        # Process the frame
-        processed_frame, intrusion = process_frame(frame, detector, zone_detector)
-        
-        # Convert to RGB for display
-        rgb_frame = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB)
-        
-        # Display the frame
-        frame_placeholder.image(rgb_frame, channels="RGB", use_column_width=True)
-        
-        # Update status
-        status = "Status: 🔴 Person(s) Detected in Zone" if intrusion else "Status: 🟢 No Intrusion"
-        status_placeholder.write(status)
-        
-        # Short sleep to reduce CPU usage
-        time.sleep(0.03)
-    
-    # Release resources
-    cap.release()
-    st.write("Camera stopped")
+        else:
+            processed_frame, _ = process_frame(frame)
+            ret, buffer = cv2.imencode('.jpg', processed_frame)
+            frame = buffer.tobytes()
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
 
-# Page: Adjust Zone
-def zone_adjustment_page():
-    st.subheader("Adjust Detection Zone")
-    
-    # Instructions
-    st.write("""
-    ### Instructions:
-    - Use the sliders below to adjust the zone points
-    - The green quadrilateral shows the detection zone
-    - Points are numbered 1-4 in the preview
-    - Click "Save Zone Settings" to apply your changes
-    - Click "Reset to Default" to restore default zone
-    """)
-    
-    # Get current zone points
-    zone_points = st.session_state['zone_points']
-    
-    # Create a placeholder for the video feed
-    frame_placeholder = st.empty()
-    
-    # Initialize camera
-    cap = cv2.VideoCapture(CAMERA_INDEX)
-    if not cap.isOpened():
-        st.error("Failed to capture video from camera")
-        return
-    
-    # Get frame dimensions
-    ret, frame = cap.read()
-    if not ret:
-        st.error("Failed to capture video from camera")
-        return
-    
-    height, width = frame.shape[:2]
-    
-    # Create a copy of the frame for drawing
-    preview_frame = frame.copy()
-    
-    # Draw current zone points
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+@app.route('/video_feed')
+def video_feed():
+    return Response(generate_frames(),
+                    mimetype='multipart/x-mixed-replace; boundary=frame')
+
+@app.route('/update_zone', methods=['POST'])
+def update_zone():
+    global zone_points, zone_detector
+    data = request.get_json()
+    points = data.get('points')
+    if not points or len(points) != 4 or not all(isinstance(x, list) and len(x) == 2 and all(isinstance(i, (int, float)) for i in x) for x in points):
+        return jsonify({'status': 'error', 'message': 'Invalid zone points'}), 400
+    # Convert all values to int
+    zone_points = [[int(x[0]), int(x[1])] for x in points]
     zone_detector = ZoneDetector(zone_points)
-    preview_frame = zone_detector.draw_zone(preview_frame)
-    
-    # Draw point numbers
-    for i, (x, y) in enumerate(zone_points):
-        cv2.circle(preview_frame, (x, y), 5, (0, 255, 0), -1)
-        cv2.putText(preview_frame, str(i+1), (x+10, y+10), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-    
-    # Display the frame
-    frame_placeholder.image(cv2.cvtColor(preview_frame, cv2.COLOR_BGR2RGB), use_column_width=True)
-    
-    # Create columns for coordinate inputs
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.write("Point 1")
-        x1 = st.slider("X1", 0, width, zone_points[0][0], key="x1")
-        y1 = st.slider("Y1", 0, height, zone_points[0][1], key="y1")
-        
-        st.write("Point 2")
-        x2 = st.slider("X2", 0, width, zone_points[1][0], key="x2")
-        y2 = st.slider("Y2", 0, height, zone_points[1][1], key="y2")
-    
-    with col2:
-        st.write("Point 3")
-        x3 = st.slider("X3", 0, width, zone_points[2][0], key="x3")
-        y3 = st.slider("Y3", 0, height, zone_points[2][1], key="y3")
-        
-        st.write("Point 4")
-        x4 = st.slider("X4", 0, width, zone_points[3][0], key="x4")
-        y4 = st.slider("Y4", 0, height, zone_points[3][1], key="y4")
-    
-    # Update zone points
-    new_zone_points = [(x1, y1), (x2, y2), (x3, y3), (x4, y4)]
-    
-    # Create a zone detector with the new points
-    temp_zone_detector = ZoneDetector(new_zone_points)
-    
-    # Draw the zone on the frame
-    preview_frame = temp_zone_detector.draw_zone(frame.copy())
-    
-    # Draw point numbers
-    for i, (x, y) in enumerate(new_zone_points):
-        cv2.circle(preview_frame, (x, y), 5, (0, 255, 0), -1)
-        cv2.putText(preview_frame, str(i+1), (x+10, y+10), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-    
-    # Display the preview
-    frame_placeholder.image(cv2.cvtColor(preview_frame, cv2.COLOR_BGR2RGB), use_column_width=True)
-    
-    # Save button
-    if st.button("Save Zone Settings"):
-        st.session_state['zone_points'] = new_zone_points
-        st.success("Zone settings saved!")
-        
-    # Reset button
-    if st.button("Reset to Default"):
-        st.session_state['zone_points'] = DEFAULT_ZONE_POINTS
-        st.success("Zone reset to default!")
-        st.experimental_rerun()
-    
-    # Release camera
-    cap.release()
+    return jsonify({'status': 'success'})
 
-# Page: View Logs
-def view_logs_page():
-    st.subheader("Intrusion Logs")
-    
-    # Get database handler
-    db_handler = get_db_handler()
-    
-    # Add filters
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        # Date filter
-        filter_date = st.date_input("Filter by Date", value=None)
-    
-    with col2:
-        # Event type filter
-        filter_type = st.selectbox(
-            "Filter by Event Type",
-            ["All", "Entry", "Exit"]
-        )
-    
-    # Get logs based on filters
-    if filter_date is not None and filter_type != "All":
-        # Filter by both date and type
-        # Convert datetime.date to string for MySQL query
-        date_str = filter_date.strftime("%Y-%m-%d")
-        logs = db_handler.get_logs_by_date(date_str)
-        logs = [log for log in logs if log[4] == filter_type]  # Filter by event type
-    elif filter_date is not None:
-        # Filter by date only
-        date_str = filter_date.strftime("%Y-%m-%d")
-        logs = db_handler.get_logs_by_date(date_str)
-    elif filter_type != "All":
-        # Filter by event type only
-        logs = db_handler.get_logs_by_event_type(filter_type)
-    else:
-        # No filters, get all logs
-        logs = db_handler.get_all_logs()
-    
-    # Check if we have logs
-    if not logs:
-        st.info("No intrusion logs found matching the criteria.")
-        return
-    
-    # Convert to DataFrame for better display
-    df = pd.DataFrame(logs, columns=["ID", "Timestamp", "Camera ID", "Image Path", "Event Type"])
-    
-    # Display logs
-    st.dataframe(df)
-    
-    # Show images
-    st.subheader("Intrusion Screenshots")
-    
-    # Create columns for displaying images
-    cols = st.columns(3)
-    
-    for i, (id, timestamp, camera_id, image_path, event_type) in enumerate(logs[:9]):  # Show up to 9 images
-        try:
-            img = cv2.imread(image_path)
-            if img is not None:
-                img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                
-                # Add caption with timestamp and event type
-                caption = f"{timestamp} - {event_type}"
-                
-                # Display image
-                cols[i % 3].image(img_rgb, caption=caption, use_column_width=True)
-                
-                # Add button to delete log
-                if cols[i % 3].button(f"Delete Log #{id}", key=f"del_{id}"):
-                    if db_handler.delete_log(id):
-                        st.success(f"Log #{id} deleted successfully!")
-                        st.experimental_rerun()
-                    else:
-                        st.error(f"Failed to delete log #{id}")
-            else:
-                cols[i % 3].error(f"Image not found: {image_path}")
-        except Exception as e:
-            cols[i % 3].error(f"Error loading image: {e}")
-    
-    # Export to CSV button
-    if st.button("Export Logs to CSV"):
-        csv_file = "intrusion_logs.csv"
-        df.to_csv(csv_file, index=False)
-        st.success(f"Logs exported to {csv_file}")
+@app.template_filter('localtime')
+def localtime_filter(value):
+    if value is None:
+        return ''
+    local_tz = timezone('Asia/Kolkata')
+    if value.tzinfo is None:
+        value = utc.localize(value)
+    return value.astimezone(local_tz).strftime('%Y-%m-%d %H:%M:%S')
 
-# Page: Settings
-def settings_page():
-    st.subheader("System Settings")
-    
-    # Detection settings
-    st.write("### Detection Settings")
-    
-    # Confidence threshold
-    confidence = st.slider(
-        "Detection Confidence Threshold",
-        min_value=0.1,
-        max_value=1.0,
-        value=CONFIDENCE_THRESHOLD,
-        step=0.05,
-        help="Minimum confidence level for person detection"
-    )
-    
-    # Cooldown period
-    cooldown = st.slider(
-        "Detection Cooldown (seconds)",
-        min_value=1,
-        max_value=10,
-        value=DETECTION_COOLDOWN,
-        step=1,
-        help="Minimum time between consecutive detections"
-    )
-    
-    # Camera settings
-    st.write("### Camera Settings")
-    
-    # Camera ID
-    camera_id = st.text_input("Camera ID", value=CAMERA_ID)
-    
-    # Database settings
-    st.write("### Database Settings")
-    
-    # Database host
-    db_host = st.text_input("Database Host", value=DB_CONFIG['host'])
-    
-    # Database user
-    db_user = st.text_input("Database User", value=DB_CONFIG['user'])
-    
-    # Database password
-    db_password = st.text_input("Database Password", value=DB_CONFIG['password'], type="password")
-    
-    # Save settings button
-    if st.button("Save Settings"):
-        # In a real application, you would save these to a config file
-        st.success("Settings saved! (Note: In a production app, these would be saved to a config file)")
-        
-        # For now, we'll just update the session state
-        st.session_state['confidence'] = confidence
-        st.session_state['cooldown'] = cooldown
-        st.session_state['camera_id'] = camera_id
-        st.session_state['db_config'] = {
-            'host': db_host,
-            'user': db_user,
-            'password': db_password,
-            'database': DB_CONFIG['database']
+@app.route('/logs')
+def view_logs():
+    category = request.args.get('category', 'all')
+    date_filter = request.args.get('date')
+    query = IntrusionLog.query
+    if category != 'all':
+        query = query.filter_by(event_type=category)
+    if date_filter:
+        query = query.filter(db.func.date(IntrusionLog.timestamp) == date_filter)
+    logs = query.order_by(IntrusionLog.timestamp.desc()).all()
+    for log in logs:
+        log.image_path = os.path.basename(log.image_path)
+    return render_template('logs.html', logs=logs)
+
+@app.route('/screenshots/<path:filename>')
+def serve_screenshot(filename):
+    return send_file(os.path.join(SCREENSHOT_DIR, filename))
+
+@app.route('/export_logs')
+def export_logs():
+    category = request.args.get('category', 'all')
+    date_filter = request.args.get('date')
+    query = IntrusionLog.query
+    if category != 'all':
+        query = query.filter_by(event_type=category)
+    if date_filter:
+        query = query.filter(db.func.date(IntrusionLog.timestamp) == date_filter)
+    logs = query.order_by(IntrusionLog.timestamp.desc()).all()
+    data = []
+    for log in logs:
+        local_tz = timezone('Asia/Kolkata')
+        ts = log.timestamp
+        if ts.tzinfo is None:
+            ts = utc.localize(ts)
+        local_ts = ts.astimezone(local_tz).strftime('%Y-%m-%d %H:%M:%S')
+        data.append({
+            'ID': log.id,
+            'Timestamp': local_ts,
+            'Camera ID': log.camera_id,
+            'Event Type': log.event_type,
+            'Image Path': os.path.basename(log.image_path)
+        })
+    df = pd.DataFrame(data)
+    output = io.StringIO()
+    df.to_csv(output, index=False)
+    output.seek(0)
+    return Response(
+        output,
+        mimetype='text/csv',
+        headers={
+            'Content-Disposition': 'attachment; filename=intrusion_logs.csv'
         }
-
-# Main function
-def main():
-    # App title
-    st.title("Intrusion Detection System")
-    
-    # Sidebar navigation
-    page = st.sidebar.selectbox(
-        "Navigation",
-        ["Home", "Adjust Zone", "View Logs", "Settings"]
     )
-    
-    # Display system information in sidebar
-    with st.sidebar.expander("System Information"):
-        st.write("Camera ID:", CAMERA_ID)
-        st.write("Model:", "YOLOv8n")
-        st.write("Detection Cooldown:", f"{DETECTION_COOLDOWN} seconds")
-        st.write("Confidence Threshold:", f"{CONFIDENCE_THRESHOLD}")
-        st.write("Database:", DB_CONFIG['database'])
-    
-    # Display page based on selection
-    if page == "Home":
-        camera_feed_page()
-    elif page == "Adjust Zone":
-        zone_adjustment_page()
-    elif page == "View Logs":
-        view_logs_page()
-    elif page == "Settings":
-        settings_page()
 
-# Run the application
-if __name__ == "__main__":
-    main()
+@app.template_filter('basename')
+def basename_filter(path):
+    return os.path.basename(path)
+
+if __name__ == '__main__':
+    with app.app_context():
+        db.create_all()
+    app.run(debug=True)
