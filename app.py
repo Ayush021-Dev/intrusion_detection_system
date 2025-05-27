@@ -28,6 +28,12 @@ st.set_page_config(
 # Global variables
 PREVIOUS_PERSON_COUNT = 0
 LAST_DETECTION_TIME = 0
+PREVIOUS_FRAME = None
+MOTION_THRESHOLD = 30  # Threshold for motion detection
+MIN_MOTION_AREA = 2000  # Increased minimum area to ignore small movements
+MAX_MOTION_AREA = 100000  # Maximum area to consider
+MIN_MOTION_WIDTH = 50  # Minimum width of motion to consider
+MIN_MOTION_HEIGHT = 50  # Minimum height of motion to consider
 
 # Initialize session state
 if 'zone_points' not in st.session_state:
@@ -47,6 +53,55 @@ def get_db_handler():
         DB_CONFIG['password'],
         DB_CONFIG['database']
     )
+
+def detect_motion(frame, zone_detector):
+    global PREVIOUS_FRAME
+    
+    # Convert frame to grayscale
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    gray = cv2.GaussianBlur(gray, (21, 21), 0)
+    
+    # Initialize previous frame if None
+    if PREVIOUS_FRAME is None:
+        PREVIOUS_FRAME = gray
+        return False, frame
+    
+    # Calculate absolute difference between current and previous frame
+    frame_delta = cv2.absdiff(PREVIOUS_FRAME, gray)
+    thresh = cv2.threshold(frame_delta, MOTION_THRESHOLD, 255, cv2.THRESH_BINARY)[1]
+    
+    # Dilate the thresholded image to fill in holes
+    thresh = cv2.dilate(thresh, None, iterations=2)
+    
+    # Find contours of moving objects
+    contours, _ = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    motion_detected = False
+    motion_frame = frame.copy()
+    
+    # Check each contour
+    for contour in contours:
+        # Get bounding box of the contour
+        (x, y, w, h) = cv2.boundingRect(contour)
+        area = cv2.contourArea(contour)
+        
+        # Skip if the motion is too small (birds, small animals) or too large (camera shake)
+        if (area < MIN_MOTION_AREA or area > MAX_MOTION_AREA or 
+            w < MIN_MOTION_WIDTH or h < MIN_MOTION_HEIGHT):
+            continue
+            
+        # Check if the motion is in the zone
+        if zone_detector.is_in_zone((x, y, x + w, y + h)):
+            motion_detected = True
+            # Draw rectangle around motion
+            cv2.rectangle(motion_frame, (x, y), (x + w, y + h), (0, 255, 255), 2)
+            cv2.putText(motion_frame, "Motion", (x, y - 10),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+    
+    # Update previous frame
+    PREVIOUS_FRAME = gray
+    
+    return motion_detected, motion_frame
 
 # Process frame function
 def process_frame(frame, detector, zone_detector):
@@ -70,27 +125,40 @@ def process_frame(frame, detector, zone_detector):
     # Draw detections
     processed_frame = detector.draw_detections(processed_frame, detections, zone_detector)
     
+    # Detect motion
+    motion_detected, motion_frame = detect_motion(frame, zone_detector)
+    
     # Add count text to frame
     cv2.putText(processed_frame, f"People in zone: {people_in_zone}", 
                (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
     
-    # Check if the number of people in the zone has changed
+    # Add motion detection text
+    if motion_detected:
+        cv2.putText(processed_frame, "Significant Motion Detected!", 
+                   (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+    
+    # Check if there's any activity (people or significant motion)
+    activity_detected = people_in_zone > 0 or motion_detected
+    
+    # Check if the number of people in the zone has changed or significant motion is detected
     current_time = time.time()
     person_count_changed = people_in_zone != PREVIOUS_PERSON_COUNT
     
-    # Take screenshot if count changed and cooldown period passed
-    if person_count_changed and current_time - LAST_DETECTION_TIME > DETECTION_COOLDOWN:
-        # Determine if it's an entry or exit event
+    # Take screenshot if count changed or significant motion detected and cooldown period passed
+    if (person_count_changed or motion_detected) and current_time - LAST_DETECTION_TIME > DETECTION_COOLDOWN:
+        # Determine event type
         if people_in_zone > PREVIOUS_PERSON_COUNT:
             event_type = "Entry"
         elif people_in_zone < PREVIOUS_PERSON_COUNT:
             event_type = "Exit"
+        elif motion_detected:
+            event_type = "Significant Motion"
         else:
-            event_type = "Change"  # This shouldn't happen, but just in case
+            event_type = "Change"
         
         # Add event type to the frame
         cv2.putText(processed_frame, f"Event: {event_type}", 
-                   (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                   (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
         
         # Add timestamp
         timestamped_frame = add_timestamp(processed_frame)
@@ -108,7 +176,7 @@ def process_frame(frame, detector, zone_detector):
     # Update the previous count for the next frame
     PREVIOUS_PERSON_COUNT = people_in_zone
     
-    return processed_frame, people_in_zone > 0
+    return processed_frame, activity_detected
 
 # Page: Home / Camera Feed
 def camera_feed_page():
