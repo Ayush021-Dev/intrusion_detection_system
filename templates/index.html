@@ -1,28 +1,28 @@
 {% extends "base.html" %}
 
 {% block content %}
-<div class="row">
-    <div class="col-md-8">
-        <div class="card">
+<div class="row justify-content-center">
+    <div class="col-lg-9">
+        <div class="card mb-4">
             <div class="card-header">
                 <h5 class="card-title mb-0">Live Camera Feed</h5>
             </div>
-            <div class="card-body" style="position: relative; width: fit-content;">
-                <div class="video-container" style="position: relative; display: inline-block;">
-                    <img id="videoFeed" src="{{ url_for('video_feed') }}" class="img-fluid" alt="Video Feed" style="display: block;">
+            <div class="card-body d-flex justify-content-center align-items-center" style="position: relative; padding: 0;">
+                <div class="video-container" id="videoContainer" style="position: relative; display: inline-block;">
+                    <img id="videoFeed" src="{{ url_for('video_feed') }}" class="img-fluid rounded shadow" alt="Video Feed" style="display: block;">
                     <canvas id="zoneCanvas" style="position: absolute; left: 0; top: 0; pointer-events: auto;"></canvas>
                 </div>
             </div>
         </div>
     </div>
-    <div class="col-md-4">
-        <div class="card">
+    <div class="col-lg-3">
+        <div class="card mb-4">
             <div class="card-header">
                 <h5 class="card-title mb-0">Zone Adjustment</h5>
             </div>
-            <div class="card-body">
-                <button class="btn btn-primary" onclick="updateZone()">Update Zone</button>
-                <button class="btn btn-secondary" onclick="resetZone()">Reset to Default</button>
+            <div class="card-body d-flex flex-column align-items-center">
+                <button class="btn btn-primary mb-2 w-100" onclick="updateZone()">Update Zone</button>
+                <button class="btn btn-secondary w-100" onclick="resetZone()">Reset to Default</button>
             </div>
         </div>
     </div>
@@ -41,10 +41,24 @@ let selectedPoint = -1;
 const canvas = document.getElementById('zoneCanvas');
 const ctx = canvas.getContext('2d');
 const video = document.getElementById('videoFeed');
+const container = document.getElementById('videoContainer');
 
 function resizeCanvas() {
-    canvas.width = video.clientWidth;
-    canvas.height = video.clientHeight;
+    if (video.naturalWidth && video.naturalHeight) {
+        canvas.width = video.naturalWidth;
+        canvas.height = video.naturalHeight;
+        video.width = video.naturalWidth;
+        video.height = video.naturalHeight;
+        container.style.width = video.naturalWidth + 'px';
+        container.style.height = video.naturalHeight + 'px';
+    } else {
+        canvas.width = video.clientWidth;
+        canvas.height = video.clientHeight;
+        video.width = video.clientWidth;
+        video.height = video.clientHeight;
+        container.style.width = video.clientWidth + 'px';
+        container.style.height = video.clientHeight + 'px';
+    }
     drawZone();
 }
 

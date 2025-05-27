@@ -32,31 +32,23 @@ class ObjectDetector:
         
         return detections
     
-    def draw_detections(self, frame, detections, zone_detector=None):
+    def draw_detections(self, frame, detections, zone_detector=None, bbox_in_zone_fn=None):
         """Draw detection boxes on the frame"""
         for detection in detections:
             bbox = detection['bbox']
             conf = detection['confidence']
-            
-            # Draw the bounding box
             x1, y1, x2, y2 = bbox
-            
-            # Check if detection is in the zone (if zone_detector provided)
             in_zone = False
             if zone_detector:
-                in_zone = zone_detector.is_in_zone(bbox)
-            
+                if bbox_in_zone_fn:
+                    in_zone = bbox_in_zone_fn(bbox, zone_detector)
+                else:
+                    in_zone = zone_detector.is_in_zone(bbox)
             color = (0, 0, 255) if in_zone else (255, 0, 0)  # Red if in zone, blue otherwise
-            
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-            
-            # Draw confidence
             text = f"{conf:.2f}"
             cv2.putText(frame, text, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-            
-            # Add warning if in zone
             if in_zone:
                 cv2.putText(frame, "Warning: Person Detected in Restricted Area!", 
                           (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-        
         return frame

@@ -40,8 +40,8 @@ class IntrusionLog(db.Model):
 PREVIOUS_PERSON_COUNT = 0
 LAST_DETECTION_TIME = 0
 PREVIOUS_FRAME = None
-MOTION_THRESHOLD = 30
-MIN_MOTION_AREA = 2000
+MOTION_THRESHOLD = 35
+MIN_MOTION_AREA = 3000
 MAX_MOTION_AREA = 100000
 MIN_MOTION_WIDTH = 50
 MIN_MOTION_HEIGHT = 50
@@ -55,37 +55,30 @@ zone_detector = ZoneDetector(zone_points)
 
 def detect_motion(frame, zone_detector):
     global PREVIOUS_FRAME
-    
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     gray = cv2.GaussianBlur(gray, (21, 21), 0)
-    
     if PREVIOUS_FRAME is None:
         PREVIOUS_FRAME = gray
         return False, frame
-    
     frame_delta = cv2.absdiff(PREVIOUS_FRAME, gray)
     thresh = cv2.threshold(frame_delta, MOTION_THRESHOLD, 255, cv2.THRESH_BINARY)[1]
     thresh = cv2.dilate(thresh, None, iterations=2)
-    
     contours, _ = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
     motion_detected = False
     motion_frame = frame.copy()
-    
     for contour in contours:
         (x, y, w, h) = cv2.boundingRect(contour)
         area = cv2.contourArea(contour)
-        
         if (area < MIN_MOTION_AREA or area > MAX_MOTION_AREA or 
             w < MIN_MOTION_WIDTH or h < MIN_MOTION_HEIGHT):
             continue
-            
-        if zone_detector.is_in_zone((x, y, x + w, y + h)):
+        center_x = x + w // 2
+        center_y = y + h // 2
+        if zone_detector.is_in_zone((center_x, center_y, center_x, center_y)):
             motion_detected = True
             cv2.rectangle(motion_frame, (x, y), (x + w, y + h), (0, 255, 255), 2)
             cv2.putText(motion_frame, "Motion", (x, y - 10),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
-    
     PREVIOUS_FRAME = gray
     return motion_detected, motion_frame
 
@@ -94,7 +87,7 @@ def process_frame(frame):
     
     processed_frame = frame.copy()
     detections = detector.detect(processed_frame)
-    processed_frame = zone_detector.draw_zone(processed_frame)
+    # processed_frame = zone_detector.draw_zone(processed_frame)  # Hide backend zone drawing
     
     people_in_zone = 0
     for detection in detections:
@@ -175,8 +168,16 @@ def update_zone():
     points = data.get('points')
     if not points or len(points) != 4 or not all(isinstance(x, list) and len(x) == 2 and all(isinstance(i, (int, float)) for i in x) for x in points):
         return jsonify({'status': 'error', 'message': 'Invalid zone points'}), 400
-    # Convert all values to int
-    zone_points = [[int(x[0]), int(x[1])] for x in points]
+    # Scaling logic
+    backend_width = 640
+    backend_height = 480
+    canvas_width = 900
+    canvas_height = int(backend_height * (canvas_width / backend_width))  # maintain aspect ratio
+    scaled_points = [
+        [int(x[0] * backend_width / canvas_width), int(x[1] * backend_height / canvas_height)]
+        for x in points
+    ]
+    zone_points = scaled_points
     zone_detector = ZoneDetector(zone_points)
     return jsonify({'status': 'success'})
 
