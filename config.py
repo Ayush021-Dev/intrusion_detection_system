@@ -2,7 +2,7 @@
 DB_CONFIG = {
     'host': 'localhost',
     'user': 'root',
-    'password': 'mysql',  # Change this to your MySQL password
+    'password': 'mysql',  
     'database': 'intrusion_detection'
 }
 

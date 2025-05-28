@@ -2,106 +2,125 @@ import cv2
 import numpy as np
 
 class ZoneDetector:
-    def __init__(self, initial_points=None):
-        """Initialize the zone detector with optional initial points"""
-        # Default zone is a rectangle in the middle of the frame
-        self.zone_points = initial_points if initial_points else [(100, 100), (400, 100), (400, 300), (100, 300)]
+    def __init__(self, initial_points=None, frame_width=640, frame_height=480):
+        """Initialize the zone detector with optional initial points and frame dimensions"""
+        # Store frame dimensions for accurate scaling
+        self.frame_width = frame_width
+        self.frame_height = frame_height
+        
+        # Default zone is a rectangle in the middle of the frame (proportional to frame size)
+        default_points = [
+            (int(frame_width * 0.2), int(frame_height * 0.2)), 
+            (int(frame_width * 0.8), int(frame_height * 0.2)), 
+            (int(frame_width * 0.8), int(frame_height * 0.8)), 
+            (int(frame_width * 0.2), int(frame_height * 0.8))
+        ]
+        
+        self.zone_points = initial_points if initial_points else default_points
         self.dragging_point = None
-        self.point_radius = 5
+        self.point_radius = max(5, min(frame_width, frame_height) // 100)  # Adaptive point radius
+    
+    def update_frame_dimensions(self, width, height):
+        """Update frame dimensions when camera resolution changes"""
+        self.frame_width = width
+        self.frame_height = height
+        self.point_radius = max(5, min(width, height) // 100)
     
     def is_in_zone(self, bbox):
         """Check if any part of the bounding box overlaps with the zone polygon"""
         x1, y1, x2, y2 = bbox
-    
+        
+        # Ensure coordinates are within frame bounds
+        x1 = max(0, min(x1, self.frame_width))
+        y1 = max(0, min(y1, self.frame_height))
+        x2 = max(0, min(x2, self.frame_width))
+        y2 = max(0, min(y2, self.frame_height))
+        
         # Create a polygon from the zone points
         zone_polygon = np.array(self.zone_points, np.int32)
-    
-        # Check all four corners of the bounding box
+        
+        # Method 1: Check bounding box corners
         corners = [
             (x1, y1),  # top-left
             (x2, y1),  # top-right
             (x2, y2),  # bottom-right
             (x1, y2)   # bottom-left
         ]
-    
-        # Check if any corner is inside the polygon
+        
         for corner in corners:
             if cv2.pointPolygonTest(zone_polygon, corner, False) >= 0:
                 return True
-    
-        # Check if the center is inside the polygon
+        
+        # Method 2: Check center point
         center_x = (x1 + x2) // 2
         center_y = (y1 + y2) // 2
         if cv2.pointPolygonTest(zone_polygon, (center_x, center_y), False) >= 0:
             return True
-    
-        # Check if any edge of the bounding box intersects with any edge of the zone polygon
-        bbox_edges = [
-            [corners[0], corners[1]],  # top edge
-            [corners[1], corners[2]],  # right edge
-            [corners[2], corners[3]],  # bottom edge
-            [corners[3], corners[0]]   # left edge
-        ]
-    
-        zone_edges = []
-        for i in range(len(self.zone_points)):
-            zone_edges.append([self.zone_points[i], self.zone_points[(i+1) % len(self.zone_points)]])
-    
-        # Check for line intersections
-        for bbox_edge in bbox_edges:
-            for zone_edge in zone_edges:
-                if self._lines_intersect(bbox_edge[0], bbox_edge[1], zone_edge[0], zone_edge[1]):
-                    return True
-    
-        # Check if zone is completely inside the bounding box
+        
+        # Method 3: Check multiple points along the bounding box perimeter
+        # This helps catch cases where the bbox crosses the zone boundary
+        perimeter_points = []
+        
+        # Top and bottom edges
+        for i in range(5):
+            x = x1 + i * (x2 - x1) // 4
+            perimeter_points.extend([(x, y1), (x, y2)])
+        
+        # Left and right edges
+        for i in range(5):
+            y = y1 + i * (y2 - y1) // 4
+            perimeter_points.extend([(x1, y), (x2, y)])
+        
+        for point in perimeter_points:
+            if cv2.pointPolygonTest(zone_polygon, point, False) >= 0:
+                return True
+        
+        # Method 4: Check if zone is completely inside the bounding box
         all_zone_points_inside_bbox = all(
             x1 <= point[0] <= x2 and y1 <= point[1] <= y2 for point in self.zone_points
         )
         if all_zone_points_inside_bbox:
             return True
-    
-        return False
-
-    def _lines_intersect(self, p1, p2, p3, p4):
-        """Check if two line segments intersect"""
-        # Convert points to numpy arrays for easier calculation
-        p1 = np.array(p1)
-        p2 = np.array(p2)
-        p3 = np.array(p3)
-        p4 = np.array(p4)
         
-        # Calculate the direction vectors
-        r = p2 - p1
-        s = p4 - p3
+        # Method 5: Use OpenCV's rectangle-polygon intersection
+        # Create a mask for the zone
+        mask = np.zeros((self.frame_height, self.frame_width), dtype=np.uint8)
+        cv2.fillPoly(mask, [zone_polygon], 255)
         
-        # Calculate the cross product
-        rxs = np.cross(r, s)
+        # Create a mask for the bounding box
+        bbox_mask = np.zeros((self.frame_height, self.frame_width), dtype=np.uint8)
+        cv2.rectangle(bbox_mask, (x1, y1), (x2, y2), 255, -1)
         
-        # If cross product is zero, lines are parallel
-        if abs(rxs) < 1e-10:
-            return False
-        
-        # Calculate t and u parameters
-        q_minus_p = p3 - p1
-        t = np.cross(q_minus_p, s) / rxs
-        u = np.cross(q_minus_p, r) / rxs
-        
-        # Check if intersection point lies on both line segments
-        return (0 <= t <= 1) and (0 <= u <= 1)
+        # Check for intersection
+        intersection = cv2.bitwise_and(mask, bbox_mask)
+        return np.any(intersection > 0)
     
     def draw_zone(self, frame):
         """Draw the zone polygon and control points on the frame"""
-        # Draw the polygon
+        # Draw the polygon with better visibility
         points = np.array(self.zone_points, np.int32)
         points = points.reshape((-1, 1, 2))
-        cv2.polylines(frame, [points], True, (0, 255, 0), 2)
         
-        # Draw the corner points
+        # Draw filled polygon with transparency
+        overlay = frame.copy()
+        cv2.fillPoly(overlay, [points], (0, 255, 0))
+        cv2.addWeighted(frame, 0.8, overlay, 0.2, 0, frame)
+        
+        # Draw polygon outline
+        cv2.polylines(frame, [points], True, (0, 255, 0), 3)
+        
+        # Draw the corner points with adaptive size
         for i, point in enumerate(self.zone_points):
+            # Draw outer circle
+            cv2.circle(frame, point, self.point_radius + 2, (255, 255, 255), -1)
+            # Draw inner circle
             cv2.circle(frame, point, self.point_radius, (0, 255, 0), -1)
-            # Add point number label
-            cv2.putText(frame, str(i+1), (point[0]-5, point[1]-10), 
-                      cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            # Add point number label with better visibility
+            label_size = max(0.4, min(self.frame_width, self.frame_height) / 1000)
+            cv2.putText(frame, str(i+1), (point[0]-8, point[1]-15), 
+                      cv2.FONT_HERSHEY_SIMPLEX, label_size, (255, 255, 255), 2)
+            cv2.putText(frame, str(i+1), (point[0]-8, point[1]-15), 
+                      cv2.FONT_HERSHEY_SIMPLEX, label_size, (0, 255, 0), 1)
         
         return frame
     
@@ -109,3 +128,41 @@ class ZoneDetector:
         """Set new zone points"""
         if len(points) == 4:
             self.zone_points = points
+    
+    def scale_points_from_ui(self, ui_points, ui_width, ui_height):
+        """Scale points from UI coordinates to actual frame coordinates"""
+        scaled_points = []
+        for point in ui_points:
+            x_scaled = int(point[0] * self.frame_width / ui_width)
+            y_scaled = int(point[1] * self.frame_height / ui_height)
+            # Ensure points are within frame bounds
+            x_scaled = max(0, min(x_scaled, self.frame_width - 1))
+            y_scaled = max(0, min(y_scaled, self.frame_height - 1))
+            scaled_points.append((x_scaled, y_scaled))
+        return scaled_points
+    
+    def get_zone_info(self):
+        """Get zone information for debugging"""
+        return {
+            'zone_points': self.zone_points,
+            'frame_dimensions': (self.frame_width, self.frame_height),
+            'zone_area': self._calculate_zone_area()
+        }
+    
+    def _calculate_zone_area(self):
+        """Calculate the area of the zone polygon"""
+        if len(self.zone_points) < 3:
+            return 0
+        
+        # Using shoelace formula
+        x = [point[0] for point in self.zone_points]
+        y = [point[1] for point in self.zone_points]
+        
+        area = 0
+        n = len(x)
+        for i in range(n):
+            j = (i + 1) % n
+            area += x[i] * y[j]
+            area -= x[j] * y[i]
+        
+        return abs(area) / 2
