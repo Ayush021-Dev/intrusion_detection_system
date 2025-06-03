@@ -39,50 +39,6 @@ class ZoneDetector:
         # Create a polygon from the zone points
         zone_polygon = np.array(self.zone_points, np.int32)
         
-        # Method 1: Check bounding box corners
-        corners = [
-            (x1, y1),  # top-left
-            (x2, y1),  # top-right
-            (x2, y2),  # bottom-right
-            (x1, y2)   # bottom-left
-        ]
-        
-        for corner in corners:
-            if cv2.pointPolygonTest(zone_polygon, corner, False) >= 0:
-                return True
-        
-        # Method 2: Check center point
-        center_x = (x1 + x2) // 2
-        center_y = (y1 + y2) // 2
-        if cv2.pointPolygonTest(zone_polygon, (center_x, center_y), False) >= 0:
-            return True
-        
-        # Method 3: Check multiple points along the bounding box perimeter
-        # This helps catch cases where the bbox crosses the zone boundary
-        perimeter_points = []
-        
-        # Top and bottom edges
-        for i in range(5):
-            x = x1 + i * (x2 - x1) // 4
-            perimeter_points.extend([(x, y1), (x, y2)])
-        
-        # Left and right edges
-        for i in range(5):
-            y = y1 + i * (y2 - y1) // 4
-            perimeter_points.extend([(x1, y), (x2, y)])
-        
-        for point in perimeter_points:
-            if cv2.pointPolygonTest(zone_polygon, point, False) >= 0:
-                return True
-        
-        # Method 4: Check if zone is completely inside the bounding box
-        all_zone_points_inside_bbox = all(
-            x1 <= point[0] <= x2 and y1 <= point[1] <= y2 for point in self.zone_points
-        )
-        if all_zone_points_inside_bbox:
-            return True
-        
-        # Method 5: Use OpenCV's rectangle-polygon intersection
         # Create a mask for the zone
         mask = np.zeros((self.frame_height, self.frame_width), dtype=np.uint8)
         cv2.fillPoly(mask, [zone_polygon], 255)
@@ -91,9 +47,17 @@ class ZoneDetector:
         bbox_mask = np.zeros((self.frame_height, self.frame_width), dtype=np.uint8)
         cv2.rectangle(bbox_mask, (x1, y1), (x2, y2), 255, -1)
         
-        # Check for intersection
+        # Check for intersection using bitwise AND
         intersection = cv2.bitwise_and(mask, bbox_mask)
-        return np.any(intersection > 0)
+        
+        # Calculate intersection area
+        intersection_area = np.sum(intersection > 0)
+        
+        # Calculate bounding box area
+        bbox_area = (x2 - x1) * (y2 - y1)
+        
+        # If there's any intersection and it's significant (more than 10% of bbox area)
+        return intersection_area > 0 and (intersection_area / bbox_area) > 0.1
     
     def draw_zone(self, frame):
         """Draw the zone polygon and control points on the frame"""

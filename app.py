@@ -11,6 +11,7 @@ from sqlalchemy import DateTime
 import json
 import io
 from pytz import timezone, utc
+from queue import Queue
 
 # Import from project modules
 from detection.detector import ObjectDetector
@@ -58,6 +59,9 @@ zone_points = DEFAULT_ZONE_POINTS
 # Initialize detector and zone detector
 detector = ObjectDetector(confidence_threshold=CONFIDENCE_THRESHOLD)
 zone_detector = None  # Will be initialized when first frame is captured
+
+# Add after the imports
+event_queue = Queue()
 
 def initialize_camera_and_zone():
     """Initialize camera and zone detector with actual camera resolution"""
@@ -153,12 +157,13 @@ def process_frame(frame):
     font_scale = max(0.5, min(processed_frame.shape[1], processed_frame.shape[0]) / 1000)
     thickness = max(1, int(font_scale * 2))
     
-    cv2.putText(processed_frame, f"People in zone: {people_in_zone}", 
-               (10, 60), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), thickness)
+    # Remove text overlays from video feed
+    # cv2.putText(processed_frame, f"People in zone: {people_in_zone}", 
+    #            (10, 60), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), thickness)
     
-    if motion_detected:
-        cv2.putText(processed_frame, "Significant Motion Detected!", 
-                   (10, 90), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 255, 255), thickness)
+    # if motion_detected:
+    #     cv2.putText(processed_frame, "Significant Motion Detected!", 
+    #                (10, 90), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 255, 255), thickness)
     
     # Log events
     current_time = time.time()
@@ -167,15 +172,20 @@ def process_frame(frame):
     if (person_count_changed or motion_detected) and current_time - LAST_DETECTION_TIME > DETECTION_COOLDOWN:
         if people_in_zone > PREVIOUS_PERSON_COUNT:
             event_type = "Entry"
+            message = f"Person entered the zone"
         elif people_in_zone < PREVIOUS_PERSON_COUNT:
             event_type = "Exit"
+            message = f"Person left the zone"
         elif motion_detected:
             event_type = "Significant Motion"
+            message = "Significant motion detected in zone"
         else:
             event_type = "Change"
+            message = "Zone activity detected"
         
-        cv2.putText(processed_frame, f"Event: {event_type}", 
-                   (10, 120), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 255, 255), thickness)
+        # Remove text overlay
+        # cv2.putText(processed_frame, f"Event: {event_type}", 
+        #            (10, 120), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 255, 255), thickness)
         
         # Save screenshot and log
         timestamped_frame = add_timestamp(processed_frame)
@@ -189,6 +199,13 @@ def process_frame(frame):
         with app.app_context():
             db.session.add(log)
             db.session.commit()
+        
+        # Add event to queue for SSE
+        event_queue.put({
+            'type': event_type,
+            'message': message,
+            'screenshot': True
+        })
         
         LAST_DETECTION_TIME = current_time
         print(f"Event logged: {event_type} at {datetime.now()}")
@@ -365,6 +382,17 @@ def export_logs():
 @app.template_filter('basename')
 def basename_filter(path):
     return os.path.basename(path)
+
+@app.route('/events')
+def events():
+    def generate():
+        while True:
+            if not event_queue.empty():
+                event = event_queue.get()
+                yield f"data: {json.dumps(event)}\n\n"
+            time.sleep(0.1)
+    
+    return Response(generate(), mimetype='text/event-stream')
 
 if __name__ == '__main__':
     with app.app_context():

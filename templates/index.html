@@ -23,6 +23,7 @@
             <div class="card-body d-flex flex-column align-items-center">
                 <button class="btn btn-primary mb-2 w-100" onclick="updateZone()">Update Zone</button>
                 <button class="btn btn-secondary w-100" onclick="resetZone()">Reset to Default</button>
+                <div id="sidebar-messages" class="mt-3 w-100"></div>
             </div>
         </div>
     </div>
@@ -30,6 +31,28 @@
 {% endblock %}
 
 {% block scripts %}
+<style>
+#screenshot-popup {
+    position: fixed;
+    left: 30px;
+    bottom: 30px;
+    background: #222;
+    color: #fff;
+    padding: 16px 24px;
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.4s;
+    z-index: 9999;
+    font-size: 1.1rem;
+}
+#screenshot-popup.show {
+    opacity: 1;
+    pointer-events: auto;
+}
+</style>
+<div id="screenshot-popup"></div>
 <script>
 let zonePoints = [
     [100, 100],
@@ -108,6 +131,30 @@ canvas.addEventListener('mouseup', () => {
     selectedPoint = -1;
 });
 
+function showSidebarMessage(msg, type = 'info') {
+    const sidebar = document.getElementById('sidebar-messages');
+    sidebar.innerHTML = `<div class='alert alert-${type} mb-0 py-2 px-3'>${msg}</div>`;
+    setTimeout(() => { sidebar.innerHTML = ''; }, 4000);
+}
+
+function showScreenshotPopup(msg) {
+    const popup = document.getElementById('screenshot-popup');
+    popup.textContent = msg;
+    popup.classList.add('show');
+    // Play a simple beep using Web Audio API
+    try {
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const oscillator = ctx.createOscillator();
+        oscillator.type = 'sine';
+        oscillator.frequency.setValueAtTime(880, ctx.currentTime);
+        oscillator.connect(ctx.destination);
+        oscillator.start();
+        oscillator.stop(ctx.currentTime + 0.15);
+        oscillator.onended = () => ctx.close();
+    } catch (e) {}
+    setTimeout(() => { popup.classList.remove('show'); }, 2500);
+}
+
 function updateZone() {
     fetch('/update_zone', {
         method: 'POST',
@@ -119,12 +166,12 @@ function updateZone() {
     .then(response => response.json())
     .then(data => {
         if (data.status === 'success') {
-            alert('Zone updated successfully!');
+            showSidebarMessage('Zone updated successfully!', 'success');
         }
     })
     .catch(error => {
         console.error('Error:', error);
-        alert('Failed to update zone');
+        showSidebarMessage('Failed to update zone', 'danger');
     });
 }
 
@@ -138,6 +185,20 @@ function resetZone() {
     drawZone();
     updateZone();
 }
+
+// Add event source listener
+const eventSource = new EventSource('/events');
+eventSource.onmessage = function(event) {
+    const data = JSON.parse(event.data);
+    
+    // Show message in sidebar
+    showSidebarMessage(data.message, data.type === 'Significant Motion' ? 'warning' : 'info');
+    
+    // If screenshot was taken, show popup
+    if (data.screenshot) {
+        showScreenshotPopup('Screenshot sent to log!');
+    }
+};
 
 // Initial resize and draw
 resizeCanvas();
