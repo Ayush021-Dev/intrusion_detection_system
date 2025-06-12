@@ -7,7 +7,7 @@ import os
 import pandas as pd
 import threading
 from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy import DateTime
+from sqlalchemy import DateTime, JSON
 import json
 import io
 from pytz import timezone, utc
@@ -30,77 +30,117 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 
 # Define database models
+class Camera(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(50), nullable=False)
+    camera_index = db.Column(db.Integer, nullable=False)
+    is_active = db.Column(db.Boolean, default=True)
+    zone_points = db.Column(JSON, default=lambda: DEFAULT_ZONE_POINTS)
+    created_at = db.Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = db.Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
 class IntrusionLog(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     timestamp = db.Column(DateTime, nullable=False, default=datetime.utcnow)
-    camera_id = db.Column(db.String(50), nullable=False)
+    camera_id = db.Column(db.Integer, db.ForeignKey('camera.id'), nullable=False)
     image_path = db.Column(db.String(255), nullable=False)
     event_type = db.Column(db.String(50), default='Detection')
+    camera = db.relationship('Camera', backref=db.backref('logs', lazy=True))
 
 # Global variables
-PREVIOUS_PERSON_COUNT = 0
-LAST_DETECTION_TIME = 0
-PREVIOUS_FRAME = None
-MOTION_THRESHOLD = 35
-MIN_MOTION_AREA = 3000
-MAX_MOTION_AREA = 100000
-MIN_MOTION_WIDTH = 50
-MIN_MOTION_HEIGHT = 50
+CAMERAS = {}  # Dictionary to store camera objects
+CAMERA_DETECTORS = {}  # Dictionary to store zone detectors for each camera
+CAMERA_PREVIOUS_FRAMES = {}  # Dictionary to store previous frames for motion detection
+CAMERA_PREVIOUS_PERSON_COUNTS = {}  # Dictionary to store previous person counts
+CAMERA_LAST_DETECTION_TIMES = {}  # Dictionary to store last detection times
+EVENT_QUEUE = Queue()
 
-# Camera variables
-ACTUAL_FRAME_WIDTH = 640
-ACTUAL_FRAME_HEIGHT = 480
+# Camera display settings
+CAMERAS_PER_PAGE = 4
 UI_DISPLAY_WIDTH = 900
 UI_DISPLAY_HEIGHT = 675
+
+# Initialize detector
+detector = ObjectDetector(confidence_threshold=CONFIDENCE_THRESHOLD)
 
 # Initialize zone points
 zone_points = DEFAULT_ZONE_POINTS
 
-# Initialize detector and zone detector
-detector = ObjectDetector(confidence_threshold=CONFIDENCE_THRESHOLD)
+# Initialize zone detector
 zone_detector = None  # Will be initialized when first frame is captured
 
-# Add after the imports
-event_queue = Queue()
-
-def initialize_camera_and_zone():
-    """Initialize camera and zone detector with actual camera resolution"""
-    global zone_detector, ACTUAL_FRAME_WIDTH, ACTUAL_FRAME_HEIGHT
-    
-    cap = cv2.VideoCapture(CAMERA_INDEX)
-    if cap.isOpened():
+def initialize_camera(camera_id, camera_index):
+    """Initialize a single camera and its zone detector"""
+    try:
+        # Try to open camera with specific backend
+        cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)  # Use DirectShow backend for Windows
+        if not cap.isOpened():
+            print(f"Warning: Could not open camera {camera_index}")
+            return None
+        
         # Get actual camera resolution
-        ACTUAL_FRAME_WIDTH = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        ACTUAL_FRAME_HEIGHT = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         
-        print(f"Camera resolution: {ACTUAL_FRAME_WIDTH}x{ACTUAL_FRAME_HEIGHT}")
+        # Set camera properties for better performance
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        cap.set(cv2.CAP_PROP_FPS, 30)
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))  # Use MJPG codec
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, frame_width)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, frame_height)
         
-        # Initialize zone detector with actual camera dimensions
+        # Test if we can read a frame
+        ret, frame = cap.read()
+        if not ret or frame is None:
+            print(f"Warning: Could not read frame from camera {camera_index}")
+            cap.release()
+            return None
+            
+        # Verify frame is not empty or corrupted
+        if frame.size == 0:
+            print(f"Warning: Empty frame received from camera {camera_index}")
+            cap.release()
+            return None
+        
+        # Initialize zone detector
+        camera = db.session.get(Camera, camera_id)
         zone_detector = ZoneDetector(
-            initial_points=None,  # Will use default proportional points
-            frame_width=ACTUAL_FRAME_WIDTH,
-            frame_height=ACTUAL_FRAME_HEIGHT
+            initial_points=camera.zone_points if camera else None,
+            frame_width=frame_width,
+            frame_height=frame_height
         )
         
-        cap.release()
-    else:
-        print(f"Warning: Could not open camera {CAMERA_INDEX}, using default resolution")
-        zone_detector = ZoneDetector(
-            initial_points=zone_points,
-            frame_width=ACTUAL_FRAME_WIDTH,
-            frame_height=ACTUAL_FRAME_HEIGHT
-        )
+        # Store camera objects
+        CAMERAS[camera_id] = cap
+        CAMERA_DETECTORS[camera_id] = zone_detector
+        CAMERA_PREVIOUS_FRAMES[camera_id] = None
+        CAMERA_PREVIOUS_PERSON_COUNTS[camera_id] = 0
+        CAMERA_LAST_DETECTION_TIMES[camera_id] = 0
+        
+        print(f"Successfully initialized camera {camera_id} (index: {camera_index})")
+        return cap
+        
+    except Exception as e:
+        print(f"Error initializing camera {camera_id}: {e}")
+        return None
 
-def detect_motion(frame, zone_detector):
-    global PREVIOUS_FRAME
+def initialize_all_cameras():
+    """Initialize all active cameras"""
+    cameras = Camera.query.filter_by(is_active=True).all()
+    for camera in cameras:
+        initialize_camera(camera.id, camera.camera_index)
+
+def detect_motion(frame, camera_id):
+    """Detect motion for a specific camera"""
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     gray = cv2.GaussianBlur(gray, (21, 21), 0)
-    if PREVIOUS_FRAME is None:
-        PREVIOUS_FRAME = gray
+    
+    if CAMERA_PREVIOUS_FRAMES[camera_id] is None:
+        CAMERA_PREVIOUS_FRAMES[camera_id] = gray
         return False, frame
     
-    frame_delta = cv2.absdiff(PREVIOUS_FRAME, gray)
-    thresh = cv2.threshold(frame_delta, MOTION_THRESHOLD, 255, cv2.THRESH_BINARY)[1]
+    frame_delta = cv2.absdiff(CAMERA_PREVIOUS_FRAMES[camera_id], gray)
+    thresh = cv2.threshold(frame_delta, 35, 255, cv2.THRESH_BINARY)[1]
     thresh = cv2.dilate(thresh, None, iterations=2)
     contours, _ = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
@@ -111,88 +151,60 @@ def detect_motion(frame, zone_detector):
         (x, y, w, h) = cv2.boundingRect(contour)
         area = cv2.contourArea(contour)
         
-        if (area < MIN_MOTION_AREA or area > MAX_MOTION_AREA or 
-            w < MIN_MOTION_WIDTH or h < MIN_MOTION_HEIGHT):
+        if (area < 3000 or area > 100000 or w < 50 or h < 50):
             continue
         
         # Check if motion is in zone using bounding box
         motion_bbox = (x, y, x + w, y + h)
-        if zone_detector.is_in_zone(motion_bbox):
+        if CAMERA_DETECTORS[camera_id].is_in_zone(motion_bbox):
             motion_detected = True
             cv2.rectangle(motion_frame, (x, y), (x + w, y + h), (0, 255, 255), 2)
             cv2.putText(motion_frame, "Motion", (x, y - 10),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
     
-    PREVIOUS_FRAME = gray
+    CAMERA_PREVIOUS_FRAMES[camera_id] = gray
     return motion_detected, motion_frame
 
-def process_frame(frame):
-    global LAST_DETECTION_TIME, PREVIOUS_PERSON_COUNT, zone_detector
-    
-    # Initialize zone detector if not done yet
-    if zone_detector is None:
-        height, width = frame.shape[:2]
-        zone_detector = ZoneDetector(
-            initial_points=None,
-            frame_width=width,
-            frame_height=height
-        )
-        print(f"Initialized zone detector with frame size: {width}x{height}")
-    
+def process_frame(frame, camera_id):
+    """Process a single frame for a specific camera"""
     processed_frame = frame.copy()
     detections = detector.detect(processed_frame)
     
     people_in_zone = 0
     for detection in detections:
-        if zone_detector.is_in_zone(detection['bbox']):
+        if CAMERA_DETECTORS[camera_id].is_in_zone(detection['bbox']):
             people_in_zone += 1
     
     # Draw detections
-    processed_frame = detector.draw_detections(processed_frame, detections, zone_detector)
+    processed_frame = detector.draw_detections(processed_frame, detections, CAMERA_DETECTORS[camera_id])
     
     # Detect motion
-    motion_detected, motion_frame = detect_motion(frame, zone_detector)
-    
-    # Add information overlay
-    font_scale = max(0.5, min(processed_frame.shape[1], processed_frame.shape[0]) / 1000)
-    thickness = max(1, int(font_scale * 2))
-    
-    # Remove text overlays from video feed
-    # cv2.putText(processed_frame, f"People in zone: {people_in_zone}", 
-    #            (10, 60), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), thickness)
-    
-    # if motion_detected:
-    #     cv2.putText(processed_frame, "Significant Motion Detected!", 
-    #                (10, 90), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 255, 255), thickness)
+    motion_detected, motion_frame = detect_motion(frame, camera_id)
     
     # Log events
     current_time = time.time()
-    person_count_changed = people_in_zone != PREVIOUS_PERSON_COUNT
+    person_count_changed = people_in_zone != CAMERA_PREVIOUS_PERSON_COUNTS[camera_id]
     
-    if (person_count_changed or motion_detected) and current_time - LAST_DETECTION_TIME > DETECTION_COOLDOWN:
-        if people_in_zone > PREVIOUS_PERSON_COUNT:
+    if (person_count_changed or motion_detected) and current_time - CAMERA_LAST_DETECTION_TIMES[camera_id] > DETECTION_COOLDOWN:
+        if people_in_zone > CAMERA_PREVIOUS_PERSON_COUNTS[camera_id]:
             event_type = "Entry"
-            message = f"Person entered the zone"
-        elif people_in_zone < PREVIOUS_PERSON_COUNT:
+            message = f"Person entered the zone in camera {camera_id}"
+        elif people_in_zone < CAMERA_PREVIOUS_PERSON_COUNTS[camera_id]:
             event_type = "Exit"
-            message = f"Person left the zone"
+            message = f"Person left the zone in camera {camera_id}"
         elif motion_detected:
             event_type = "Significant Motion"
-            message = "Significant motion detected in zone"
+            message = f"Significant motion detected in zone for camera {camera_id}"
         else:
             event_type = "Change"
-            message = "Zone activity detected"
-        
-        # Remove text overlay
-        # cv2.putText(processed_frame, f"Event: {event_type}", 
-        #            (10, 120), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 255, 255), thickness)
+            message = f"Zone activity detected in camera {camera_id}"
         
         # Save screenshot and log
         timestamped_frame = add_timestamp(processed_frame)
         image_path = save_screenshot(timestamped_frame, SCREENSHOT_DIR, event_type)
         
         log = IntrusionLog(
-            camera_id=CAMERA_ID,
+            camera_id=camera_id,
             image_path=image_path,
             event_type=event_type
         )
@@ -201,71 +213,208 @@ def process_frame(frame):
             db.session.commit()
         
         # Add event to queue for SSE
-        event_queue.put({
+        EVENT_QUEUE.put({
             'type': event_type,
             'message': message,
+            'camera_id': camera_id,
             'screenshot': True
         })
         
-        LAST_DETECTION_TIME = current_time
-        print(f"Event logged: {event_type} at {datetime.now()}")
+        CAMERA_LAST_DETECTION_TIMES[camera_id] = current_time
+        print(f"Event logged: {event_type} for camera {camera_id} at {datetime.now()}")
     
-    PREVIOUS_PERSON_COUNT = people_in_zone
+    CAMERA_PREVIOUS_PERSON_COUNTS[camera_id] = people_in_zone
     return processed_frame, people_in_zone > 0 or motion_detected
 
-def generate_frames():
-    cap = cv2.VideoCapture(CAMERA_INDEX)
-    
-    # Set camera properties for better performance
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-    cap.set(cv2.CAP_PROP_FPS, 30)
-    
-    frame_count = 0
+def generate_frames(camera_id):
+    """Generate frames for a specific camera"""
+    cap = CAMERAS.get(camera_id)
+    if not cap:
+        print(f"Camera {camera_id} not initialized")
+        return
     
     while True:
-        success, frame = cap.read()
-        if not success:
-            print("Failed to read frame from camera")
-            break
-        
-        frame_count += 1
-        
-        # Update zone detector dimensions on first frame
-        if frame_count == 1 and zone_detector:
-            height, width = frame.shape[:2]
-            zone_detector.update_frame_dimensions(width, height)
-            print(f"Updated zone detector dimensions: {width}x{height}")
-        
         try:
-            processed_frame, _ = process_frame(frame)
-            ret, buffer = cv2.imencode('.jpg', processed_frame, 
-                                     [cv2.IMWRITE_JPEG_QUALITY, 85])
+            success, frame = cap.read()
+            if not success or frame is None:
+                print(f"Failed to read frame from camera {camera_id}")
+                # Try to reinitialize the camera
+                camera = db.session.get(Camera, camera_id)
+                if camera and camera.is_active:
+                    cap = cv2.VideoCapture(camera.camera_index, cv2.CAP_DSHOW)
+                    if not cap.isOpened():
+                        print(f"Failed to reinitialize camera {camera_id}")
+                        break
+                    CAMERAS[camera_id] = cap
+                    continue
+                else:
+                    break
+            
+            # Verify frame is valid
+            if frame.size == 0:
+                print(f"Empty frame received from camera {camera_id}")
+                continue
+
+            # Debug: Save the first raw frame
+            if not hasattr(generate_frames, "debug_saved"):
+                os.makedirs("test_output", exist_ok=True)
+                cv2.imwrite("test_output/flask_first_frame.jpg", frame)
+                generate_frames.debug_saved = True
+            
+            # Process the frame
+            processed_frame, _ = process_frame(frame, camera_id)
+
+            # Debug: Save the first processed frame
+            if not hasattr(generate_frames, "debug_saved_processed"):
+                cv2.imwrite("test_output/flask_first_processed_frame.jpg", processed_frame)
+                generate_frames.debug_saved_processed = True
+            
+            # Resize frame for display
+            display_frame = cv2.resize(processed_frame, (UI_DISPLAY_WIDTH, UI_DISPLAY_HEIGHT))
+            
+            # Encode frame
+            ret, buffer = cv2.imencode('.jpg', display_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
             if ret:
                 frame_bytes = buffer.tobytes()
                 yield (b'--frame\r\n'
                        b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+            
         except Exception as e:
-            print(f"Error processing frame: {e}")
+            print(f"Error processing frame for camera {camera_id}: {e}")
             continue
-    
-    cap.release()
 
-# Initialize camera and zone detector
-initialize_camera_and_zone()
+def check_camera_availability(camera_index):
+    """Check if a camera is available and can be opened"""
+    try:
+        if isinstance(camera_index, str) and camera_index.startswith('rtsp://'):
+            # For RTSP cameras, try to open the stream
+            cap = cv2.VideoCapture(camera_index)
+            if not cap.isOpened():
+                return False
+            ret, _ = cap.read()
+            cap.release()
+            return ret
+        else:
+            # For local cameras, try to open the device
+            cap = cv2.VideoCapture(int(camera_index))
+            if not cap.isOpened():
+                return False
+            ret, _ = cap.read()
+            cap.release()
+            return ret
+    except Exception as e:
+        print(f"Error checking camera {camera_index}: {e}")
+        return False
+
+def initialize_default_cameras():
+    """Initialize only the webcam as the default camera for testing"""
+    with app.app_context():
+        if Camera.query.first() is None:
+            print("No cameras found in database. Initializing webcam only...")
+            webcam = {
+                'name': 'Webcam',
+                'camera_index': 0,
+                'is_active': False,
+                'zone_points': DEFAULT_ZONE_POINTS
+            }
+            camera = Camera(**webcam)
+            db.session.add(camera)
+            try:
+                db.session.commit()
+                print("Webcam added successfully!")
+            except Exception as e:
+                db.session.rollback()
+                print(f"Error adding webcam: {e}")
+
+def check_and_update_camera_status():
+    """Check all cameras and update their status"""
+    with app.app_context():
+        cameras = Camera.query.all()
+        for camera in cameras:
+            # Special handling for webcam (index 0)
+            if camera.camera_index == 0:
+                is_available = check_camera_availability(0)
+                if camera.is_active != is_available:
+                    camera.is_active = is_available
+                    print(f"Camera {camera.name} (Webcam) status updated to: {'Active' if is_available else 'Inactive'}")
+            else:
+                # For other cameras, mark as inactive for now
+                if camera.is_active:
+                    camera.is_active = False
+                    print(f"Camera {camera.name} marked as inactive")
+        
+        try:
+            db.session.commit()
+        except Exception as e:
+            db.session.rollback()
+            print(f"Error updating camera status: {e}")
+
+# Initialize all cameras on startup
+# initialize_all_cameras()  # Removing this line since it's called in app context
 
 @app.route('/')
 def index():
-    return render_template('index.html')
+    """Show grid view of cameras"""
+    page = request.args.get('page', 1, type=int)
+    
+    # Get active cameras from database
+    active_cameras = Camera.query.filter_by(is_active=True).all()
+    
+    # Add placeholder cameras
+    placeholder_cameras = [
+        {'id': 2, 'name': 'Camera 2', 'is_active': False, 'rtsp_link': None},
+        {'id': 3, 'name': 'Camera 3', 'is_active': False, 'rtsp_link': None},
+        {'id': 4, 'name': 'Camera 4', 'is_active': False, 'rtsp_link': None},
+        {'id': 5, 'name': 'Camera 5', 'is_active': False, 'rtsp_link': None}
+    ]
+    
+    # Combine all cameras
+    all_cameras = list(active_cameras) + placeholder_cameras
+    
+    # Calculate pagination
+    total_cameras = len(all_cameras)
+    total_pages = (total_cameras + CAMERAS_PER_PAGE - 1) // CAMERAS_PER_PAGE
+    
+    # Get cameras for current page
+    start_idx = (page - 1) * CAMERAS_PER_PAGE
+    end_idx = start_idx + CAMERAS_PER_PAGE
+    current_page_cameras = all_cameras[start_idx:end_idx]
+    
+    # Create pagination object
+    class Pagination:
+        def __init__(self, page, total_pages):
+            self.page = page
+            self.pages = total_pages
+            self.has_prev = page > 1
+            self.has_next = page < total_pages
+            self.prev_num = page - 1
+            self.next_num = page + 1
+            
+        def iter_pages(self):
+            for p in range(1, self.pages + 1):
+                yield p
+    
+    pagination = Pagination(page, total_pages)
+    
+    return render_template('index.html', 
+                         cameras=current_page_cameras,
+                         pagination=pagination)
 
-@app.route('/video_feed')
-def video_feed():
-    return Response(generate_frames(),
+@app.route('/camera/<int:camera_id>')
+def camera_view(camera_id):
+    """Show single camera view with zone configuration"""
+    camera = Camera.query.get_or_404(camera_id)
+    return render_template('camera.html', camera=camera)
+
+@app.route('/video_feed/<int:camera_id>')
+def video_feed(camera_id):
+    """Video feed for a specific camera"""
+    return Response(generate_frames(camera_id),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
 
-@app.route('/update_zone', methods=['POST'])
-def update_zone():
-    global zone_points, zone_detector
-    
+@app.route('/update_zone/<int:camera_id>', methods=['POST'])
+def update_zone(camera_id):
+    """Update zone points for a specific camera"""
     try:
         data = request.get_json()
         points = data.get('points')
@@ -277,7 +426,10 @@ def update_zone():
                   all(isinstance(i, (int, float)) for i in x) for x in points):
             return jsonify({'status': 'error', 'message': 'Invalid point format'}), 400
         
-        if zone_detector is None:
+        camera = Camera.query.get_or_404(camera_id)
+        zone_detector = CAMERA_DETECTORS.get(camera_id)
+        
+        if not zone_detector:
             return jsonify({'status': 'error', 'message': 'Zone detector not initialized'}), 400
         
         # Scale points from UI coordinates to actual camera coordinates
@@ -285,10 +437,14 @@ def update_zone():
             points, UI_DISPLAY_WIDTH, UI_DISPLAY_HEIGHT
         )
         
-        zone_points = scaled_points
-        zone_detector.set_zone_points(zone_points)
+        # Update camera zone points in database
+        camera.zone_points = scaled_points
+        db.session.commit()
         
-        print(f"Zone updated with points: {scaled_points}")
+        # Update zone detector
+        zone_detector.set_zone_points(scaled_points)
+        
+        print(f"Zone updated for camera {camera_id} with points: {scaled_points}")
         return jsonify({
             'status': 'success',
             'scaled_points': scaled_points,
@@ -296,13 +452,14 @@ def update_zone():
         })
         
     except Exception as e:
-        print(f"Error updating zone: {e}")
+        print(f"Error updating zone for camera {camera_id}: {e}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-@app.route('/get_zone_info')
-def get_zone_info():
-    """Get current zone information for debugging"""
-    if zone_detector is None:
+@app.route('/get_zone_info/<int:camera_id>')
+def get_zone_info(camera_id):
+    """Get current zone information for a specific camera"""
+    zone_detector = CAMERA_DETECTORS.get(camera_id)
+    if not zone_detector:
         return jsonify({'error': 'Zone detector not initialized'})
     
     return jsonify(zone_detector.get_zone_info())
@@ -387,14 +544,18 @@ def basename_filter(path):
 def events():
     def generate():
         while True:
-            if not event_queue.empty():
-                event = event_queue.get()
+            if not EVENT_QUEUE.empty():
+                event = EVENT_QUEUE.get()
                 yield f"data: {json.dumps(event)}\n\n"
             time.sleep(0.1)
     
     return Response(generate(), mimetype='text/event-stream')
 
+# Initialize database and cameras on startup
 if __name__ == '__main__':
     with app.app_context():
         db.create_all()
-    app.run(debug=True, host='0.0.0.0', port=5000)
+        initialize_default_cameras()
+        check_and_update_camera_status()
+        initialize_all_cameras()
+    app.run(debug=False, host='0.0.0.0', port=5000, use_reloader=False)
