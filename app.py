@@ -363,22 +363,14 @@ def initialize_default_cameras():
                 print(f"Error adding webcam: {e}")
 
 def check_and_update_camera_status():
-    """Check all cameras and update their status"""
+    """Check all cameras and update their status based on availability."""
     with app.app_context():
         cameras = Camera.query.all()
         for camera in cameras:
-            # Special handling for webcam (index 0)
-            if camera.camera_index == 0:
-                is_available = check_camera_availability(0)
-                if camera.is_active != is_available:
-                    camera.is_active = is_available
-                    print(f"Camera {camera.name} (Webcam) status updated to: {'Active' if is_available else 'Inactive'}")
-            else:
-                # For other cameras, mark as inactive for now
-                if camera.is_active:
-                    camera.is_active = False
-                    print(f"Camera {camera.name} marked as inactive")
-        
+            is_available = check_camera_availability(camera.camera_index)
+            if camera.is_active != is_available:
+                camera.is_active = is_available
+                print(f"Camera {camera.name} status updated to: {'Active' if is_available else 'Inactive'}")
         try:
             db.session.commit()
         except Exception as e:
