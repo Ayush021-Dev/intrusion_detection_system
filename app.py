@@ -108,7 +108,8 @@ def sync_cameras_with_db(camera_list):
 def initialize_camera(camera_id, camera_index):
     """Initialize a single camera and its zone detector"""
     try:
-        # Try to open camera with specific backend
+        print(f"Initializing camera {camera_id} with index {camera_index}")
+        # Open camera (works for both webcam and RTSP)
         cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)  # Use DirectShow backend for Windows
         if not cap.isOpened():
             print(f"Warning: Could not open camera {camera_index}")
@@ -117,6 +118,7 @@ def initialize_camera(camera_id, camera_index):
         # Get actual camera resolution
         frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        print(f"Camera {camera_id} resolution: {frame_width}x{frame_height}")
         
         # Set camera properties for better performance
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
@@ -160,11 +162,31 @@ def initialize_camera(camera_id, camera_index):
         print(f"Error initializing camera {camera_id}: {e}")
         return None
 
+def check_and_update_camera_status():
+    """Check all cameras and update their status based on availability."""
+    with app.app_context():
+        cameras = Camera.query.all()
+        print(f"Found {len(cameras)} cameras in the database.")
+        for camera in cameras:
+            if camera.is_active:
+                print(f"Checking camera: {camera.name} (index: {camera.camera_index})")
+                is_available = check_camera_availability(camera.camera_index)
+                if camera.is_active != is_available:
+                    camera.is_active = is_available
+                    print(f"Camera {camera.name} status updated to: {'Active' if is_available else 'Inactive'}")
+        try:
+            db.session.commit()
+        except Exception as e:
+            db.session.rollback()
+            print(f"Error updating camera status: {e}")
+
 def initialize_all_cameras():
     """Initialize all active cameras"""
-    cameras = Camera.query.filter_by(is_active=True).all()
-    for camera in cameras:
-        initialize_camera(camera.id, camera.camera_index)
+    with app.app_context():
+        active_cameras = Camera.query.filter_by(is_active=True).all()
+        print(f"Initializing {len(active_cameras)} active cameras.")
+        for camera in active_cameras:
+            initialize_camera(camera.id, camera.camera_index)
 
 def detect_motion(frame, camera_id):
     """Detect motion for a specific camera"""
@@ -341,44 +363,6 @@ def check_camera_availability(camera_index):
     except Exception as e:
         print(f"Error checking camera {camera_index}: {e}")
         return False
-
-def initialize_default_cameras():
-    """Initialize only the webcam as the default camera for testing"""
-    with app.app_context():
-        if Camera.query.first() is None:
-            print("No cameras found in database. Initializing webcam only...")
-            webcam = {
-                'name': 'Webcam',
-                'camera_index': 0,
-                'is_active': False,
-                'zone_points': DEFAULT_ZONE_POINTS
-            }
-            camera = Camera(**webcam)
-            db.session.add(camera)
-            try:
-                db.session.commit()
-                print("Webcam added successfully!")
-            except Exception as e:
-                db.session.rollback()
-                print(f"Error adding webcam: {e}")
-
-def check_and_update_camera_status():
-    """Check all cameras and update their status based on availability."""
-    with app.app_context():
-        cameras = Camera.query.all()
-        for camera in cameras:
-            is_available = check_camera_availability(camera.camera_index)
-            if camera.is_active != is_available:
-                camera.is_active = is_available
-                print(f"Camera {camera.name} status updated to: {'Active' if is_available else 'Inactive'}")
-        try:
-            db.session.commit()
-        except Exception as e:
-            db.session.rollback()
-            print(f"Error updating camera status: {e}")
-
-# Initialize all cameras on startup
-# initialize_all_cameras()  # Removing this line since it's called in app context
 
 @app.route('/')
 def index():
@@ -576,4 +560,4 @@ if __name__ == '__main__':
         sync_cameras_with_db(camera_list)
         check_and_update_camera_status()
         initialize_all_cameras()
-    app.run(debug=False, host='0.0.0.0', port=5000, use_reloader=False)
+    app.run(debug=False, host='0.0.0.0', port=4000, use_reloader=False)
