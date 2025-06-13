@@ -109,8 +109,15 @@ def initialize_camera(camera_id, camera_index):
     """Initialize a single camera and its zone detector"""
     try:
         print(f"Initializing camera {camera_id} with index {camera_index}")
-        # Open camera (works for both webcam and RTSP)
-        cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)  # Use DirectShow backend for Windows
+        
+        # Use different backends for webcam and RTSP
+        if isinstance(camera_index, int):
+            # For webcam, use DirectShow backend
+            cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
+        else:
+            # For RTSP, use default backend
+            cap = cv2.VideoCapture(camera_index)
+            
         if not cap.isOpened():
             print(f"Warning: Could not open camera {camera_index}")
             return None
@@ -123,7 +130,11 @@ def initialize_camera(camera_id, camera_index):
         # Set camera properties for better performance
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         cap.set(cv2.CAP_PROP_FPS, 30)
-        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))  # Use MJPG codec
+        
+        # Only set MJPG codec for webcams
+        if isinstance(camera_index, int):
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+            
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, frame_width)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, frame_height)
         
