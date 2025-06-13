@@ -86,3 +86,28 @@ intrusion_detection_system/
 └── README.md               # Project documentation
 ```
 
+## Camera Configuration
+
+All cameras (webcam or RTSP) are now configured via a `cameras.json` file in the project root. Example format:
+
+```
+[
+  {
+    "name": "Webcam",
+    "camera_index": 0,
+    "is_active": true,
+    "zone_points": [[100, 100], [400, 100], [400, 300], [100, 300]]
+  },
+  {
+    "name": "Office RTSP",
+    "camera_index": "rtsp://user:pass@192.168.1.10:554/stream1",
+    "is_active": true,
+    "zone_points": [[50, 50], [300, 50], [300, 200], [50, 200]]
+  }
+]
+```
+
+- `camera_index` can be an integer (for local webcams) or a string (for RTSP URLs).
+- The number of cameras is determined by the number of entries in this file.
+- On startup, the app will sync the database with this file.
+

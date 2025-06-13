@@ -18,8 +18,10 @@ from detection.detector import ObjectDetector
 from detection.zone_detector import ZoneDetector
 from utils.image_utils import save_screenshot, add_timestamp, resize_image
 from config import (
-    DB_CONFIG, CAMERA_ID, CAMERA_INDEX, DETECTION_COOLDOWN,
-    DEFAULT_ZONE_POINTS, CONFIDENCE_THRESHOLD, SCREENSHOT_DIR
+    DETECTION_COOLDOWN,
+    DEFAULT_ZONE_POINTS,
+    CONFIDENCE_THRESHOLD,
+    SCREENSHOT_DIR
 )
 
 app = Flask(__name__)
@@ -68,6 +70,40 @@ zone_points = DEFAULT_ZONE_POINTS
 
 # Initialize zone detector
 zone_detector = None  # Will be initialized when first frame is captured
+
+CAMERA_CONFIG_FILE = 'cameras.json'
+
+def load_cameras_from_json(json_path):
+    """Load camera definitions from a JSON file."""
+    with open(json_path, 'r') as f:
+        return json.load(f)
+
+def sync_cameras_with_db(camera_list):
+    """Sync the database with the camera list from JSON."""
+    existing_cameras = {c.camera_index: c for c in Camera.query.all()}
+    for cam in camera_list:
+        idx = cam['camera_index']
+        # Check if camera exists (by camera_index or RTSP string)
+        camera = None
+        for c in existing_cameras.values():
+            if str(c.camera_index) == str(idx):
+                camera = c
+                break
+        if camera:
+            # Update fields
+            camera.name = cam['name']
+            camera.is_active = cam.get('is_active', True)
+            camera.zone_points = cam.get('zone_points', DEFAULT_ZONE_POINTS)
+        else:
+            # Add new camera
+            new_camera = Camera(
+                name=cam['name'],
+                camera_index=idx,
+                is_active=cam.get('is_active', True),
+                zone_points=cam.get('zone_points', DEFAULT_ZONE_POINTS)
+            )
+            db.session.add(new_camera)
+    db.session.commit()
 
 def initialize_camera(camera_id, camera_index):
     """Initialize a single camera and its zone detector"""
@@ -357,19 +393,8 @@ def index():
     """Show grid view of cameras"""
     page = request.args.get('page', 1, type=int)
     
-    # Get active cameras from database
-    active_cameras = Camera.query.filter_by(is_active=True).all()
-    
-    # Add placeholder cameras
-    placeholder_cameras = [
-        {'id': 2, 'name': 'Camera 2', 'is_active': False, 'rtsp_link': None},
-        {'id': 3, 'name': 'Camera 3', 'is_active': False, 'rtsp_link': None},
-        {'id': 4, 'name': 'Camera 4', 'is_active': False, 'rtsp_link': None},
-        {'id': 5, 'name': 'Camera 5', 'is_active': False, 'rtsp_link': None}
-    ]
-    
-    # Combine all cameras
-    all_cameras = list(active_cameras) + placeholder_cameras
+    # Get all cameras from database (active and inactive)
+    all_cameras = Camera.query.order_by(Camera.id).all()
     
     # Calculate pagination
     total_cameras = len(all_cameras)
@@ -555,7 +580,8 @@ def events():
 if __name__ == '__main__':
     with app.app_context():
         db.create_all()
-        initialize_default_cameras()
+        camera_list = load_cameras_from_json(CAMERA_CONFIG_FILE)
+        sync_cameras_with_db(camera_list)
         check_and_update_camera_status()
         initialize_all_cameras()
     app.run(debug=False, host='0.0.0.0', port=5000, use_reloader=False)
